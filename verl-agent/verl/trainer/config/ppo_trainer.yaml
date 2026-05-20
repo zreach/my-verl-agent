@@ -231,6 +231,22 @@ custom_reward_function:
   path: null
   name: compute_score
 
+distillation:
+  # Lightweight OPD path for verl-agent. This uses sampled-token teacher logprobs
+  # computed by a frozen teacher policy worker, then adds the distillation signal
+  # inside the actor PPO update. Top-k forward-KL OPD is intentionally not wired
+  # here to keep the agent integration small.
+  enabled: False
+  teacher_model_path: null
+  loss_mode: k3 # kl / k1 / abs / mse / k2 / low_var_kl / k3
+  use_policy_gradient: True
+  use_task_rewards: True
+  distillation_loss_coef: 1.0
+  loss_max_clamp: 10.0
+  clip_ratio: ${actor_rollout_ref.actor.clip_ratio}
+  clip_ratio_low: ${actor_rollout_ref.actor.clip_ratio_low}
+  clip_ratio_high: ${actor_rollout_ref.actor.clip_ratio_high}
+
 algorithm:
   gamma: 1.0
   lam: 1.0

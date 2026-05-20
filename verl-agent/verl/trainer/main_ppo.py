@@ -142,6 +142,12 @@ class TaskRunner:
             role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
             mapping[Role.RefPolicy] = global_pool_id
 
+        if config.get("distillation", {}).get("enabled", False):
+            if not config.distillation.get("teacher_model_path", None):
+                raise ValueError("distillation.teacher_model_path must be set when distillation.enabled=True")
+            role_worker_mapping[Role.TeacherPolicy] = ray.remote(ActorRolloutRefWorker)
+            mapping[Role.TeacherPolicy] = global_pool_id
+
         reward_manager_name = config.reward_model.get("reward_manager", "episode")
         if reward_manager_name == 'episode':
             from agent_system.reward_manager import EpisodeRewardManager

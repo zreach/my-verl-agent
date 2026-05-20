@@ -322,6 +322,10 @@ class DataParallelPPOActor(BasePPOActor):
         multi_turn = data.meta_info.get("multi_turn", False)
 
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids", "old_log_probs", "advantages"]
+        distillation_config = self.config.get("distillation", {})
+        distillation_enabled = distillation_config.get("enabled", False)
+        if distillation_enabled:
+            select_keys.append("teacher_log_probs")
         if multi_turn:
             select_keys.append("loss_mask")
         if self.config.use_kl_loss:
@@ -424,6 +428,54 @@ class DataParallelPPOActor(BasePPOActor):
                         policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
                         metrics["actor/kl_loss"] = kl_loss.detach().item()
                         metrics["actor/kl_coef"] = self.config.kl_loss_coef
+
+                    if distillation_enabled:
+                        teacher_log_probs = data["teacher_log_probs"]
+                        distill_loss_mode = distillation_config.get("loss_mode", "k3")
+                        distillation_losses = kl_penalty(
+                            logprob=log_prob,
+                            ref_logprob=teacher_log_probs,
+                            kl_penalty=distill_loss_mode,
+                        )
+                        loss_max_clamp = distillation_config.get("loss_max_clamp", None)
+                        if loss_max_clamp is not None:
+                            distillation_losses = distillation_losses.clamp(
+                                min=-loss_max_clamp,
+                                max=loss_max_clamp,
+                            )
+
+                        if distillation_config.get("use_policy_gradient", True):
+                            distill_pg_loss, distill_pg_clipfrac, distill_ppo_kl, distill_pg_clipfrac_lower = policy_loss_fn(
+                                old_log_prob=old_log_prob,
+                                log_prob=log_prob,
+                                advantages=-distillation_losses.detach(),
+                                response_mask=response_mask,
+                                cliprange=distillation_config.get("clip_ratio", clip_ratio),
+                                cliprange_low=distillation_config.get("clip_ratio_low", clip_ratio_low),
+                                cliprange_high=distillation_config.get("clip_ratio_high", clip_ratio_high),
+                                clip_ratio_c=clip_ratio_c,
+                                loss_agg_mode=loss_agg_mode,
+                            )
+                            distill_loss = distill_pg_loss
+                            metrics["actor/distillation_pg_clipfrac"] = distill_pg_clipfrac.detach().item()
+                            metrics["actor/distillation_ppo_kl"] = distill_ppo_kl.detach().item()
+                            metrics["actor/distillation_pg_clipfrac_lower"] = distill_pg_clipfrac_lower.detach().item()
+                        else:
+                            distill_loss = agg_loss(
+                                loss_mat=distillation_losses,
+                                loss_mask=response_mask,
+                                loss_agg_mode=loss_agg_mode,
+                            )
+
+                        if not distillation_config.get("use_task_rewards", True):
+                            policy_loss = torch.zeros_like(policy_loss)
+                        distill_coef = distillation_config.get("distillation_loss_coef", 1.0)
+                        policy_loss = policy_loss + distill_coef * distill_loss
+                        metrics["actor/distillation_loss"] = distill_loss.detach().item()
+                        metrics["actor/distillation_abs_loss"] = (
+                            torch.masked_select(distillation_losses.detach().abs(), response_mask.bool()).mean().item()
+                        )
+                        metrics["actor/distillation_loss_coef"] = distill_coef
 
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz

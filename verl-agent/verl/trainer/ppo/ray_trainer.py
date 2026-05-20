@@ -79,6 +79,7 @@ class Role(Enum):
     RefPolicy = 4
     RewardModel = 5
     ActorRolloutRef = 6
+    TeacherPolicy = 7
 
 
 class AdvantageEstimator(str, Enum):
@@ -429,6 +430,7 @@ class RayPPOTrainer:
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = Role.RefPolicy in role_worker_mapping
+        self.use_teacher_policy = Role.TeacherPolicy in role_worker_mapping
         self.use_rm = Role.RewardModel in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name
@@ -839,9 +841,13 @@ class RayPPOTrainer:
         # create actor and rollout
         if self.hybrid_engine:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRollout)
+            actor_rollout_config = deepcopy(self.config.actor_rollout_ref)
+            if self.config.get("distillation", {}).get("enabled", False):
+                OmegaConf.set_struct(actor_rollout_config, False)
+                actor_rollout_config.distillation = deepcopy(self.config.distillation)
             actor_rollout_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[Role.ActorRollout],
-                config=self.config.actor_rollout_ref,
+                config=actor_rollout_config,
                 role="actor_rollout",
             )
             self.resource_pool_to_cls[resource_pool]["actor_rollout"] = actor_rollout_cls
@@ -859,6 +865,19 @@ class RayPPOTrainer:
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
             ref_policy_cls = RayClassWithInitArgs(self.role_worker_mapping[Role.RefPolicy], config=self.config.actor_rollout_ref, role="ref")
             self.resource_pool_to_cls[resource_pool]["ref"] = ref_policy_cls
+
+        # create teacher policy for lightweight sampled-logprob OPD
+        if self.use_teacher_policy:
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.TeacherPolicy)
+            teacher_config = deepcopy(self.config.actor_rollout_ref)
+            OmegaConf.set_struct(teacher_config, False)
+            teacher_config.model.path = self.config.distillation.teacher_model_path
+            teacher_policy_cls = RayClassWithInitArgs(
+                self.role_worker_mapping[Role.TeacherPolicy],
+                config=teacher_config,
+                role="ref",
+            )
+            self.resource_pool_to_cls[resource_pool]["teacher"] = teacher_policy_cls
 
         # create a reward model if reward_fn is None
         if self.use_rm:
@@ -890,6 +909,10 @@ class RayPPOTrainer:
         if self.use_reference_policy and not self.ref_in_actor:
             self.ref_policy_wg = all_wg["ref"]
             self.ref_policy_wg.init_model()
+
+        if self.use_teacher_policy:
+            self.teacher_policy_wg = all_wg["teacher"]
+            self.teacher_policy_wg.init_model()
 
         if self.use_rm:
             self.rm_wg = all_wg["rm"]
@@ -1182,6 +1205,12 @@ class RayPPOTrainer:
                             else:
                                 ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
+
+                    if self.use_teacher_policy:
+                        with _timer("teacher", timing_raw):
+                            teacher_log_prob = self.teacher_policy_wg.compute_ref_log_prob(batch)
+                            teacher_log_prob.batch["teacher_log_probs"] = teacher_log_prob.batch.pop("ref_log_prob")
+                            batch = batch.union(teacher_log_prob)
 
                     # compute values
                     if self.use_critic:
