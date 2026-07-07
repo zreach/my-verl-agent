@@ -1,22 +1,22 @@
 set -x
 ENGINE=${1:-vllm}
-# export VLLM_ATTENTION_BACKEND=XFORMERS
-export VLLM_ATTENTION_BACKEND=FLASH_ATTN
+export VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-FLASH_ATTN}
 
+num_cpus_per_env_worker=${NUM_CPUS_PER_ENV_WORKER:-0.1}
 
-num_cpus_per_env_worker=0.1 # The CPU resource allocated for each environment worker. If you want to use less CPU resources, you can decrease this value.
-
-train_data_size=16
-val_data_size=128
-group_size=8
+train_data_size=${TRAIN_DATA_SIZE:-16}
+val_data_size=${VAL_DATA_SIZE:-128}
+group_size=${GROUP_SIZE:-8}
 
 STUDENT_CKPT=${STUDENT_CKPT:-/workspace/hf/Qwen3-1.7B}
 TEACHER_CKPT=${TEACHER_CKPT:-/workspace/hf/Qwen3-8B}
+OPD_METHOD=${OPD_METHOD:-pg}
+OPD_TARGET=${OPD_TARGET:-topk}
+OPD_TOPK=${OPD_TOPK:-32}
 PROJECT_NAME=${PROJECT_NAME:-verl_agent_alfworld}
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-grpo_qwen3_1.7b_opd_from_8b}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-grpo_qwen3_1.7b_opd_${OPD_METHOD}_${OPD_TARGET}}
 export TENSORBOARD_DIR=${TENSORBOARD_DIR:-tensorboard_log/${PROJECT_NAME}/${EXPERIMENT_NAME}}
 
-# We only use data preparation to indicate the modality and the data size.
 python3 -m examples.data_preprocess.prepare \
     --mode 'text' \
     --train_data_size $train_data_size \
@@ -59,6 +59,9 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
     distillation.enabled=True \
     distillation.teacher_model_path=$TEACHER_CKPT \
+    distillation.method=$OPD_METHOD \
+    distillation.target=$OPD_TARGET \
+    distillation.topk=$OPD_TOPK \
     distillation.loss_mode=k3 \
     distillation.use_policy_gradient=True \
     distillation.use_task_rewards=True \
@@ -79,4 +82,5 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=-1 \
     trainer.test_freq=5 \
     trainer.total_epochs=150 \
-    trainer.val_before_train=True $@
+    trainer.val_before_train=True ${@:2}
+

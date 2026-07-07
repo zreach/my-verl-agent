@@ -1208,9 +1208,18 @@ class RayPPOTrainer:
 
                     if self.use_teacher_policy:
                         with _timer("teacher", timing_raw):
-                            teacher_log_prob = self.teacher_policy_wg.compute_ref_log_prob(batch)
-                            teacher_log_prob.batch["teacher_log_probs"] = teacher_log_prob.batch.pop("ref_log_prob")
-                            batch = batch.union(teacher_log_prob)
+                            distillation_target = self.config.distillation.get("target", "sampled")
+                            if distillation_target == "sampled":
+                                teacher_log_prob = self.teacher_policy_wg.compute_ref_log_prob(batch)
+                                teacher_log_prob.batch["teacher_log_probs"] = teacher_log_prob.batch.pop("ref_log_prob")
+                                batch = batch.union(teacher_log_prob)
+                            elif distillation_target in ["full", "topk"]:
+                                batch.meta_info["opd_target"] = distillation_target
+                                batch.meta_info["opd_topk"] = self.config.distillation.get("topk", 32)
+                                teacher_distribution = self.teacher_policy_wg.compute_ref_opd_distribution(batch)
+                                batch = batch.union(teacher_distribution)
+                            else:
+                                raise ValueError(f"Unsupported distillation.target: {distillation_target}")
 
                     # compute values
                     if self.use_critic:
