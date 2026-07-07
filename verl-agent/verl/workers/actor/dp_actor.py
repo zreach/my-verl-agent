@@ -320,6 +320,17 @@ class DataParallelPPOActor(BasePPOActor):
         token_ce = token_ce * response_mask
         return token_kl, token_ce
 
+    def _opd_reverse_kl_baseline(self, student_logits, teacher_log_probs, response_mask, topk_indices=None):
+        student_log_probs = torch.log_softmax(student_logits.float(), dim=-1)
+        if topk_indices is not None:
+            student_log_probs = torch.gather(student_log_probs, dim=-1, index=topk_indices)
+            student_log_probs = student_log_probs - torch.logsumexp(student_log_probs, dim=-1, keepdim=True)
+        teacher_log_probs = teacher_log_probs.float()
+        teacher_log_probs = teacher_log_probs - torch.logsumexp(teacher_log_probs, dim=-1, keepdim=True)
+        student_probs = student_log_probs.exp()
+        reverse_kl = (student_probs * (student_log_probs - teacher_log_probs)).sum(dim=-1)
+        return reverse_kl * response_mask
+
     def _optimizer_step(self):
         assert self.config.grad_clip is not None
 
@@ -348,6 +359,8 @@ class DataParallelPPOActor(BasePPOActor):
         use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
 
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+        if target == "topk" and "student_topk_indices" in data.batch.keys():
+            select_keys.append("student_topk_indices")
         batch = data.select(batch_keys=select_keys).batch
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
@@ -373,9 +386,14 @@ class DataParallelPPOActor(BasePPOActor):
                 if target == "full":
                     full_log_probs_lst.append(log_probs)
                 elif target == "topk":
-                    values, topk_indices = torch.topk(log_probs, k=min(topk, log_probs.size(-1)), dim=-1)
-                    topk_log_probs_lst.append(values)
-                    topk_indices_lst.append(topk_indices)
+                    if "student_topk_indices" in micro_batch:
+                        topk_indices = micro_batch["student_topk_indices"]
+                        topk_log_probs_lst.append(torch.gather(log_probs, dim=-1, index=topk_indices))
+                        topk_indices_lst.append(topk_indices)
+                    else:
+                        values, topk_indices = torch.topk(log_probs, k=min(topk, log_probs.size(-1)), dim=-1)
+                        topk_log_probs_lst.append(values)
+                        topk_indices_lst.append(topk_indices)
                 else:
                     raise ValueError(f"Unsupported OPD distribution target: {target}")
 
@@ -395,6 +413,45 @@ class DataParallelPPOActor(BasePPOActor):
             topk_log_probs = topk_log_probs[revert_indices]
             topk_indices = topk_indices[revert_indices]
         return DataProto.from_dict(tensors={"teacher_topk_log_probs": topk_log_probs, "teacher_topk_indices": topk_indices})
+
+    @GPUMemoryLogger(role="dp actor", logger=logger)
+    def compute_opd_topk_indices(self, data: DataProto, topk: int = 32) -> DataProto:
+        """Compute student top-k token ids at response positions for vOPD top-k baseline."""
+        self.actor_module.eval()
+
+        micro_batch_size = data.meta_info["micro_batch_size"]
+        temperature = data.meta_info["temperature"]
+        use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
+
+        select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+        batch = data.select(batch_keys=select_keys).batch
+        has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
+
+        if has_multi_modal_inputs:
+            num_micro_batches = data.batch.batch_size[0] // micro_batch_size
+            non_tensor_select_keys = ["multi_modal_inputs"]
+            micro_batches = data.select(select_keys, non_tensor_select_keys).chunk(num_micro_batches)
+        elif use_dynamic_bsz:
+            max_token_len = data.meta_info["max_token_len"] * self.ulysses_sequence_parallel_size
+            micro_batches, indices = rearrange_micro_batches(batch=batch, max_token_len=max_token_len)
+        else:
+            micro_batches = batch.split(micro_batch_size)
+
+        topk_indices_lst = []
+        for micro_batch in micro_batches:
+            if isinstance(micro_batch, DataProto):
+                micro_batch = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+            with torch.no_grad():
+                logits = self._forward_micro_batch_response_logits(micro_batch, temperature=temperature)
+                _, topk_indices = torch.topk(logits.float(), k=min(topk, logits.size(-1)), dim=-1)
+                topk_indices_lst.append(topk_indices)
+
+        topk_indices = torch.concat(topk_indices_lst, dim=0)
+        if use_dynamic_bsz:
+            indices = list(itertools.chain.from_iterable(indices))
+            revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long, device=topk_indices.device)
+            topk_indices = topk_indices[revert_indices]
+        return DataProto.from_dict(tensors={"student_topk_indices": topk_indices})
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def compute_log_prob(self, data: DataProto, calculate_entropy=False) -> torch.Tensor:
@@ -473,7 +530,18 @@ class DataParallelPPOActor(BasePPOActor):
         distillation_enabled = distillation_config.get("enabled", False)
         distillation_target = distillation_config.get("target", "sampled")
         if distillation_enabled:
-            if distillation_target == "sampled":
+            distillation_method = distillation_config.get("method", None)
+            if distillation_method is None:
+                distillation_method = "pg" if distillation_config.get("use_policy_gradient", True) else "gkd"
+            if distillation_method == "vopd":
+                select_keys.append("teacher_log_probs")
+                if distillation_target == "full":
+                    select_keys.append("teacher_full_log_probs")
+                elif distillation_target == "topk":
+                    select_keys.extend(["teacher_topk_log_probs", "teacher_topk_indices"])
+                else:
+                    raise ValueError("distillation.method=vopd requires distillation.target=full or topk")
+            elif distillation_target == "sampled":
                 select_keys.append("teacher_log_probs")
             elif distillation_target == "full":
                 select_keys.append("teacher_full_log_probs")
@@ -589,7 +657,28 @@ class DataParallelPPOActor(BasePPOActor):
                         if distillation_method is None:
                             distillation_method = "pg" if distillation_config.get("use_policy_gradient", True) else "gkd"
 
-                        if distillation_target == "sampled":
+                        if distillation_method == "vopd":
+                            if distillation_target not in ["full", "topk"]:
+                                raise ValueError("distillation.method=vopd requires distillation.target=full or topk")
+                            teacher_log_probs = data["teacher_log_probs"]
+                            sample_reward = teacher_log_probs - log_prob
+                            student_logits = self._forward_micro_batch_response_logits(data, temperature=temperature)
+                            if distillation_target == "full":
+                                baseline_kl = self._opd_reverse_kl_baseline(
+                                    student_logits=student_logits,
+                                    teacher_log_probs=data["teacher_full_log_probs"],
+                                    response_mask=response_mask,
+                                )
+                            else:
+                                baseline_kl = self._opd_reverse_kl_baseline(
+                                    student_logits=student_logits,
+                                    teacher_log_probs=data["teacher_topk_log_probs"],
+                                    response_mask=response_mask,
+                                    topk_indices=data["teacher_topk_indices"],
+                                )
+                            distillation_losses = -(sample_reward + baseline_kl.detach()) * response_mask
+                            distill_direct_losses = distillation_losses
+                        elif distillation_target == "sampled":
                             teacher_log_probs = data["teacher_log_probs"]
                             distill_loss_mode = distillation_config.get("loss_mode", "k3")
                             distillation_losses = kl_penalty(
@@ -625,7 +714,7 @@ class DataParallelPPOActor(BasePPOActor):
                             if distillation_target == "sampled":
                                 distill_direct_losses = distillation_losses
 
-                        if distillation_method == "pg":
+                        if distillation_method in ["pg", "vopd"]:
                             distill_pg_loss, distill_pg_clipfrac, distill_ppo_kl, distill_pg_clipfrac_lower = policy_loss_fn(
                                 old_log_prob=old_log_prob,
                                 log_prob=log_prob,
@@ -660,6 +749,7 @@ class DataParallelPPOActor(BasePPOActor):
                         )
                         metrics["actor/distillation_loss_coef"] = distill_coef
                         metrics["actor/distillation_method_pg"] = float(distillation_method == "pg")
+                        metrics["actor/distillation_method_vopd"] = float(distillation_method == "vopd")
                         metrics["actor/distillation_target_full"] = float(distillation_target == "full")
                         metrics["actor/distillation_target_topk"] = float(distillation_target == "topk")
 

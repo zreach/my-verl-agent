@@ -1208,8 +1208,26 @@ class RayPPOTrainer:
 
                     if self.use_teacher_policy:
                         with _timer("teacher", timing_raw):
+                            distillation_method = self.config.distillation.get("method", None)
+                            if distillation_method is None:
+                                distillation_method = "pg" if self.config.distillation.get("use_policy_gradient", True) else "gkd"
                             distillation_target = self.config.distillation.get("target", "sampled")
-                            if distillation_target == "sampled":
+                            if distillation_method == "vopd":
+                                teacher_log_prob = self.teacher_policy_wg.compute_ref_log_prob(batch)
+                                teacher_log_prob.batch["teacher_log_probs"] = teacher_log_prob.batch.pop("ref_log_prob")
+                                batch = batch.union(teacher_log_prob)
+                                if distillation_target == "topk":
+                                    batch.meta_info["opd_topk"] = self.config.distillation.get("topk", 32)
+                                    student_topk = self.actor_rollout_wg.compute_opd_topk_indices(batch)
+                                    batch = batch.union(student_topk)
+                                if distillation_target in ["full", "topk"]:
+                                    batch.meta_info["opd_target"] = distillation_target
+                                    batch.meta_info["opd_topk"] = self.config.distillation.get("topk", 32)
+                                    teacher_distribution = self.teacher_policy_wg.compute_ref_opd_distribution(batch)
+                                    batch = batch.union(teacher_distribution)
+                                else:
+                                    raise ValueError("distillation.method=vopd requires distillation.target=full or topk")
+                            elif distillation_target == "sampled":
                                 teacher_log_prob = self.teacher_policy_wg.compute_ref_log_prob(batch)
                                 teacher_log_prob.batch["teacher_log_probs"] = teacher_log_prob.batch.pop("ref_log_prob")
                                 batch = batch.union(teacher_log_prob)
