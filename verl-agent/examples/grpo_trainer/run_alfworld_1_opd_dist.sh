@@ -31,7 +31,7 @@ else
     OPD_USE_POLICY_GRADIENT=False
 fi
 PROJECT_NAME=${PROJECT_NAME:-verl_agent_alfworld}
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-grpo_qwen3_1.7b_opd_${OPD_METHOD}_${OPD_TARGET}}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-grpo_qwen2.5_1.5b_opd_${OPD_METHOD}_${OPD_TARGET}}
 export TENSORBOARD_DIR=${TENSORBOARD_DIR:-tensorboard_log/${PROJECT_NAME}/${EXPERIMENT_NAME}}
 
 python3 -m examples.data_preprocess.prepare \
