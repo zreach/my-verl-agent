@@ -1,5 +1,8 @@
 set -x
 ENGINE=${1:-vllm}
+if [ $# -gt 0 ]; then
+    shift
+fi
 export VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-FLASH_ATTN}
 
 num_cpus_per_env_worker=${NUM_CPUS_PER_ENV_WORKER:-0.1}
@@ -13,6 +16,25 @@ TEACHER_CKPT=${TEACHER_CKPT:-/root/hf/langfeng01/GiGPO-Qwen2.5-7B-Instruct-ALFWo
 OPD_METHOD=${OPD_METHOD:-pg}
 OPD_TARGET=${OPD_TARGET:-sampled}
 OPD_TOPK=${OPD_TOPK:-32}
+if [ $# -gt 0 ] && [ "$1" = "--topk" ]; then
+    if [ $# -lt 2 ]; then
+        echo "--topk requires a positive integer value."
+        exit 1
+    fi
+    OPD_TOPK=$2
+    shift 2
+elif [ $# -gt 0 ] && [[ "$1" =~ ^[0-9]+$ ]]; then
+    OPD_TOPK=$1
+    shift
+fi
+if ! [[ "$OPD_TOPK" =~ ^[0-9]+$ ]]; then
+    echo "OPD_TOPK must be a positive integer, got: $OPD_TOPK"
+    exit 1
+fi
+if [ "$OPD_TOPK" -le 0 ]; then
+    echo "OPD_TOPK must be greater than 0, got: $OPD_TOPK"
+    exit 1
+fi
 OPD_LOSS_MODE=${OPD_LOSS_MODE:-}
 if [ -z "$OPD_LOSS_MODE" ]; then
     if [ "$OPD_METHOD" = "gkd" ] && [ "$OPD_TARGET" = "topk" ]; then
@@ -31,7 +53,12 @@ else
     OPD_USE_POLICY_GRADIENT=False
 fi
 PROJECT_NAME=${PROJECT_NAME:-verl_agent_alfworld}
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-grpo_qwen2.5_1.5b_opd_${OPD_METHOD}_${OPD_TARGET}}
+if [ "$OPD_TARGET" = "topk" ]; then
+    DEFAULT_EXPERIMENT_NAME=grpo_qwen2.5_1.5b_opd_${OPD_METHOD}_${OPD_TARGET}_k${OPD_TOPK}
+else
+    DEFAULT_EXPERIMENT_NAME=grpo_qwen2.5_1.5b_opd_${OPD_METHOD}_${OPD_TARGET}
+fi
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-$DEFAULT_EXPERIMENT_NAME}
 export TENSORBOARD_DIR=${TENSORBOARD_DIR:-tensorboard_log/${PROJECT_NAME}/${EXPERIMENT_NAME}}
 
 python3 -m examples.data_preprocess.prepare \
@@ -99,4 +126,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=-1 \
     trainer.test_freq=5 \
     trainer.total_epochs=150 \
-    trainer.val_before_train=True ${@:2}
+    trainer.val_before_train=True "$@"
