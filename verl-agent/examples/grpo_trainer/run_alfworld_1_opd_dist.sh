@@ -8,8 +8,8 @@ train_data_size=${TRAIN_DATA_SIZE:-16}
 val_data_size=${VAL_DATA_SIZE:-128}
 group_size=${GROUP_SIZE:-8}
 
-STUDENT_CKPT=${STUDENT_CKPT:-/workspace/hf/Qwen3-1.7B}
-TEACHER_CKPT=${TEACHER_CKPT:-/workspace/hf/Qwen3-8B}
+STUDENT_CKPT=${STUDENT_CKPT:-/root/hf/Qwen/Qwen2.5-1.5B-Instruct}
+TEACHER_CKPT=${TEACHER_CKPT:-/root/hf/langfeng01/GiGPO-Qwen2.5-7B-Instruct-ALFWorld}
 OPD_METHOD=${OPD_METHOD:-pg}
 OPD_TARGET=${OPD_TARGET:-sampled}
 OPD_TOPK=${OPD_TOPK:-32}
@@ -91,7 +91,7 @@ python3 -m verl.trainer.main_ppo \
     env.rollout.n=$group_size \
     env.resources_per_worker.num_cpus=$num_cpus_per_env_worker \
     trainer.critic_warmup=0 \
-    trainer.logger=['console','tensorboard'] \
+    trainer.logger=['console','tensorboard','wandb'] \
     trainer.project_name=$PROJECT_NAME \
     trainer.experiment_name=$EXPERIMENT_NAME \
     trainer.n_gpus_per_node=8 \
