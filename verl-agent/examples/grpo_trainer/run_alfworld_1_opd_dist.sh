@@ -65,6 +65,8 @@ else
 fi
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-$DEFAULT_EXPERIMENT_NAME}
 export TENSORBOARD_DIR=${TENSORBOARD_DIR:-tensorboard_log/${PROJECT_NAME}/${EXPERIMENT_NAME}}
+CKPT_DIR=${CKPT_DIR:-/root/agent/${EXPERIMENT_NAME}}
+SAVE_FREQ=${SAVE_FREQ:-5}
 
 python3 -m examples.data_preprocess.prepare \
     --mode 'text' \
@@ -129,9 +131,10 @@ python3 -m verl.trainer.main_ppo \
     trainer.logger=['console','tensorboard','wandb'] \
     trainer.project_name=$PROJECT_NAME \
     trainer.experiment_name=$EXPERIMENT_NAME \
+    trainer.default_local_dir=$CKPT_DIR \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
-    trainer.save_freq=-1 \
+    trainer.save_freq=$SAVE_FREQ \
     trainer.test_freq=5 \
     trainer.total_epochs=150 \
     trainer.val_before_train=True "$@"
