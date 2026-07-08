@@ -319,11 +319,19 @@ class DataParallelPPOActor(BasePPOActor):
             else:
                 method = "pg" if distillation_config.get("use_policy_gradient", True) else "gkd"
 
-        if method == "pg" and target != "sampled":
-            raise ValueError("OPD PG follows the sampled-token estimator and only supports distillation.target=sampled.")
+        if method in ["pg", "rlsd"] and target != "sampled":
+            raise ValueError(f"distillation.method={method} only supports distillation.target=sampled.")
         if method == "vopd" and target not in ["full", "topk"]:
             raise ValueError("distillation.method=vopd requires distillation.target=full or topk")
         return method, target
+
+    def _resolve_rlsd_lambda(self, distillation_config, global_step):
+        rlsd_lambda = float(distillation_config.get("rlsd_lambda", 0.5))
+        decay_steps = int(distillation_config.get("rlsd_lambda_decay_steps", 0))
+        if decay_steps > 0 and global_step is not None:
+            progress = min(max(float(global_step) / float(decay_steps), 0.0), 1.0)
+            rlsd_lambda = rlsd_lambda * (1.0 - progress)
+        return min(max(rlsd_lambda, 0.0), 1.0)
 
     def _opd_token_kl_from_teacher_distribution(self, student_logits, teacher_log_probs, response_mask, topk_indices=None):
         student_log_probs = torch.log_softmax(student_logits.float(), dim=-1)
@@ -575,6 +583,7 @@ class DataParallelPPOActor(BasePPOActor):
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
         multi_turn = data.meta_info.get("multi_turn", False)
+        global_step = data.meta_info.get("global_step", None)
 
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids", "old_log_probs", "advantages"]
         distillation_config = self.config.get("distillation", {})
@@ -587,6 +596,8 @@ class DataParallelPPOActor(BasePPOActor):
                     select_keys.append("teacher_full_log_probs")
                 elif distillation_target == "topk":
                     select_keys.extend(["teacher_topk_log_probs", "teacher_topk_indices", "student_topk_log_probs"])
+            elif distillation_method == "rlsd":
+                select_keys.append("teacher_log_probs")
             elif distillation_target == "sampled":
                 select_keys.append("teacher_log_probs")
             elif distillation_method == "gkd" and distillation_target == "full":
@@ -701,7 +712,30 @@ class DataParallelPPOActor(BasePPOActor):
                     if distillation_enabled:
                         distillation_method, distillation_target = self._resolve_distillation_mode(distillation_config)
 
-                        if distillation_method == "vopd":
+                        if distillation_method == "rlsd":
+                            teacher_log_probs = data["teacher_log_probs"]
+                            rlsd_lambda = self._resolve_rlsd_lambda(
+                                distillation_config=distillation_config,
+                                global_step=global_step,
+                            )
+                            rlsd_clip_epsilon = float(distillation_config.get("rlsd_clip_epsilon", 0.2))
+                            if not 0.0 <= rlsd_clip_epsilon < 1.0:
+                                raise ValueError(f"distillation.rlsd_clip_epsilon must be in [0, 1), got {rlsd_clip_epsilon}")
+
+                            evidence_delta = (teacher_log_probs - old_log_prob).detach()
+                            evidence_log_weight = (torch.sign(advantages.detach()) * evidence_delta).clamp(min=-20.0, max=20.0)
+                            evidence_weight = torch.exp(evidence_log_weight)
+                            clipped_weight = evidence_weight.clamp(
+                                min=1.0 - rlsd_clip_epsilon,
+                                max=1.0 + rlsd_clip_epsilon,
+                            )
+                            credit_scale = (1.0 - rlsd_lambda) + rlsd_lambda * clipped_weight
+                            rlsd_advantages = (advantages * credit_scale.detach()).detach()
+                            distillation_losses = -rlsd_advantages
+                            distill_direct_losses = distillation_losses
+                            masked_weight = torch.masked_select(clipped_weight.detach(), response_mask.bool())
+                            masked_scale = torch.masked_select(credit_scale.detach(), response_mask.bool())
+                        elif distillation_method == "vopd":
                             teacher_log_probs = data["teacher_log_probs"]
                             sample_reward = teacher_log_probs - log_prob
                             if distillation_target == "full":
@@ -747,7 +781,7 @@ class DataParallelPPOActor(BasePPOActor):
                                     topk_indices=teacher_indices,
                                 )
                         loss_max_clamp = distillation_config.get("loss_max_clamp", None)
-                        if loss_max_clamp is not None:
+                        if loss_max_clamp is not None and distillation_method != "rlsd":
                             distillation_losses = distillation_losses.clamp(
                                 min=-loss_max_clamp,
                                 max=loss_max_clamp,
@@ -755,7 +789,7 @@ class DataParallelPPOActor(BasePPOActor):
                             if distillation_method == "gkd" or distillation_target == "sampled":
                                 distill_direct_losses = distillation_losses
 
-                        if distillation_method in ["pg", "vopd"]:
+                        if distillation_method in ["pg", "vopd", "rlsd"]:
                             distill_pg_loss, distill_pg_clipfrac, distill_ppo_kl, distill_pg_clipfrac_lower = policy_loss_fn(
                                 old_log_prob=old_log_prob,
                                 log_prob=log_prob,
@@ -767,10 +801,15 @@ class DataParallelPPOActor(BasePPOActor):
                                 clip_ratio_c=clip_ratio_c,
                                 loss_agg_mode=loss_agg_mode,
                             )
-                            distill_loss = distill_pg_loss
+                            distill_loss = distill_pg_loss - pg_loss if distillation_method == "rlsd" else distill_pg_loss
                             metrics["actor/distillation_pg_clipfrac"] = distill_pg_clipfrac.detach().item()
                             metrics["actor/distillation_ppo_kl"] = distill_ppo_kl.detach().item()
                             metrics["actor/distillation_pg_clipfrac_lower"] = distill_pg_clipfrac_lower.detach().item()
+                            if distillation_method == "rlsd":
+                                metrics["actor/rlsd_lambda"] = rlsd_lambda
+                                metrics["actor/rlsd_clip_epsilon"] = rlsd_clip_epsilon
+                                metrics["actor/rlsd_clipped_weight"] = masked_weight.mean().item()
+                                metrics["actor/rlsd_credit_scale"] = masked_scale.mean().item()
                         elif distillation_method == "gkd":
                             distill_loss = agg_loss(
                                 loss_mat=distill_direct_losses,
@@ -780,7 +819,7 @@ class DataParallelPPOActor(BasePPOActor):
                         else:
                             raise ValueError(f"Unsupported distillation.method: {distillation_method}")
 
-                        if not distillation_config.get("use_task_rewards", True):
+                        if distillation_method != "rlsd" and not distillation_config.get("use_task_rewards", True):
                             policy_loss = torch.zeros_like(policy_loss)
                         distill_coef = distillation_config.get("distillation_loss_coef", 1.0)
                         policy_loss = policy_loss + distill_coef * distill_loss
@@ -791,6 +830,7 @@ class DataParallelPPOActor(BasePPOActor):
                         metrics["actor/distillation_loss_coef"] = distill_coef
                         metrics["actor/distillation_method_pg"] = float(distillation_method == "pg")
                         metrics["actor/distillation_method_vopd"] = float(distillation_method == "vopd")
+                        metrics["actor/distillation_method_rlsd"] = float(distillation_method == "rlsd")
                         metrics["actor/distillation_target_full"] = float(distillation_target == "full")
                         metrics["actor/distillation_target_topk"] = float(distillation_target == "topk")
 

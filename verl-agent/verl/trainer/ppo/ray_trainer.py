@@ -1217,8 +1217,8 @@ class RayPPOTrainer:
                                     distillation_target = "topk"
                                 else:
                                     distillation_method = "pg" if self.config.distillation.get("use_policy_gradient", True) else "gkd"
-                            if distillation_method == "pg" and distillation_target != "sampled":
-                                raise ValueError("OPD PG follows the sampled-token estimator and only supports distillation.target=sampled.")
+                            if distillation_method in ["pg", "rlsd"] and distillation_target != "sampled":
+                                raise ValueError(f"distillation.method={distillation_method} only supports distillation.target=sampled.")
                             if distillation_method == "vopd":
                                 teacher_log_prob = self.teacher_policy_wg.compute_ref_log_prob(batch)
                                 teacher_log_prob.batch["teacher_log_probs"] = teacher_log_prob.batch.pop("ref_log_prob")
@@ -1312,6 +1312,7 @@ class RayPPOTrainer:
                         # update actor
                         with _timer("update_actor", timing_raw):
                             batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+                            batch.meta_info["global_step"] = self.global_steps
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)

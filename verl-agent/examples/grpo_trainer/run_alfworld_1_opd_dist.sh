@@ -16,6 +16,9 @@ TEACHER_CKPT=${TEACHER_CKPT:-/root/hf/langfeng01/GiGPO-Qwen2.5-7B-Instruct-ALFWo
 OPD_METHOD=${OPD_METHOD:-pg}
 OPD_TARGET=${OPD_TARGET:-sampled}
 OPD_TOPK=${OPD_TOPK:-32}
+RLSD_LAMBDA=${RLSD_LAMBDA:-0.5}
+RLSD_LAMBDA_DECAY_STEPS=${RLSD_LAMBDA_DECAY_STEPS:-50}
+RLSD_CLIP_EPSILON=${RLSD_CLIP_EPSILON:-0.2}
 if [ $# -gt 0 ] && [ "$1" = "--topk" ]; then
     if [ $# -lt 2 ]; then
         echo "--topk requires a positive integer value."
@@ -43,17 +46,19 @@ if [ -z "$OPD_LOSS_MODE" ]; then
         OPD_LOSS_MODE=k3
     fi
 fi
-if [ "$OPD_METHOD" = "pg" ] && [ "$OPD_TARGET" != "sampled" ]; then
-    echo "OPD PG uses the sampled-token estimator; set OPD_TARGET=sampled or use OPD_METHOD=gkd for full/topk."
+if { [ "$OPD_METHOD" = "pg" ] || [ "$OPD_METHOD" = "rlsd" ]; } && [ "$OPD_TARGET" != "sampled" ]; then
+    echo "$OPD_METHOD uses sampled-token teacher logprobs; set OPD_TARGET=sampled or use OPD_METHOD=gkd for full/topk."
     exit 1
 fi
-if [ "$OPD_METHOD" = "pg" ]; then
+if [ "$OPD_METHOD" = "pg" ] || [ "$OPD_METHOD" = "rlsd" ]; then
     OPD_USE_POLICY_GRADIENT=True
 else
     OPD_USE_POLICY_GRADIENT=False
 fi
 PROJECT_NAME=${PROJECT_NAME:-verl_agent_alfworld}
-if [ "$OPD_TARGET" = "topk" ]; then
+if [ "$OPD_METHOD" = "rlsd" ]; then
+    DEFAULT_EXPERIMENT_NAME=grpo_qwen2.5_1.5b_rlsd_l${RLSD_LAMBDA}_c${RLSD_CLIP_EPSILON}_d${RLSD_LAMBDA_DECAY_STEPS}
+elif [ "$OPD_TARGET" = "topk" ]; then
     DEFAULT_EXPERIMENT_NAME=grpo_qwen2.5_1.5b_opd_${OPD_METHOD}_${OPD_TARGET}_k${OPD_TOPK}
 else
     DEFAULT_EXPERIMENT_NAME=grpo_qwen2.5_1.5b_opd_${OPD_METHOD}_${OPD_TARGET}
@@ -108,6 +113,9 @@ python3 -m verl.trainer.main_ppo \
     distillation.topk=$OPD_TOPK \
     distillation.loss_mode=$OPD_LOSS_MODE \
     distillation.use_policy_gradient=$OPD_USE_POLICY_GRADIENT \
+    distillation.rlsd_lambda=$RLSD_LAMBDA \
+    distillation.rlsd_lambda_decay_steps=$RLSD_LAMBDA_DECAY_STEPS \
+    distillation.rlsd_clip_epsilon=$RLSD_CLIP_EPSILON \
     distillation.use_task_rewards=True \
     distillation.distillation_loss_coef=1.0 \
     distillation.loss_max_clamp=10.0 \
