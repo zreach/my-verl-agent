@@ -233,14 +233,14 @@ custom_reward_function:
 
 distillation:
   # OPD path for verl-agent. The teacher is a frozen policy evaluated on
-  # student-sampled trajectories. target=sampled keeps the legacy sampled-token
-  # path; target=full/topk enables teacher distribution distillation.
+  # student-sampled trajectories. PG follows the sampled-token estimator;
+  # GKD uses teacher full/top-k distribution distillation.
   enabled: False
   teacher_model_path: null
   method: null # null / pg / gkd / vopd
   target: sampled # sampled / full / topk. vopd supports full/topk baselines.
   topk: 32
-  loss_mode: k3 # kl / k1 / abs / mse / k2 / low_var_kl / k3
+  loss_mode: k3 # kl / k1 / abs / mse / k2 / low_var_kl / k3 / forward_kl_topk
   use_policy_gradient: True # legacy alias: True -> method=pg, False -> method=gkd when method is unset
   use_task_rewards: True
   distillation_loss_coef: 1.0

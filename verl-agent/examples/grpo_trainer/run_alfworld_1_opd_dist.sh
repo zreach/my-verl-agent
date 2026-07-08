@@ -11,8 +11,25 @@ group_size=${GROUP_SIZE:-8}
 STUDENT_CKPT=${STUDENT_CKPT:-/workspace/hf/Qwen3-1.7B}
 TEACHER_CKPT=${TEACHER_CKPT:-/workspace/hf/Qwen3-8B}
 OPD_METHOD=${OPD_METHOD:-pg}
-OPD_TARGET=${OPD_TARGET:-topk}
+OPD_TARGET=${OPD_TARGET:-sampled}
 OPD_TOPK=${OPD_TOPK:-32}
+OPD_LOSS_MODE=${OPD_LOSS_MODE:-}
+if [ -z "$OPD_LOSS_MODE" ]; then
+    if [ "$OPD_METHOD" = "gkd" ] && [ "$OPD_TARGET" = "topk" ]; then
+        OPD_LOSS_MODE=forward_kl_topk
+    else
+        OPD_LOSS_MODE=k3
+    fi
+fi
+if [ "$OPD_METHOD" = "pg" ] && [ "$OPD_TARGET" != "sampled" ]; then
+    echo "OPD PG uses the sampled-token estimator; set OPD_TARGET=sampled or use OPD_METHOD=gkd for full/topk."
+    exit 1
+fi
+if [ "$OPD_METHOD" = "pg" ]; then
+    OPD_USE_POLICY_GRADIENT=True
+else
+    OPD_USE_POLICY_GRADIENT=False
+fi
 PROJECT_NAME=${PROJECT_NAME:-verl_agent_alfworld}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-grpo_qwen3_1.7b_opd_${OPD_METHOD}_${OPD_TARGET}}
 export TENSORBOARD_DIR=${TENSORBOARD_DIR:-tensorboard_log/${PROJECT_NAME}/${EXPERIMENT_NAME}}
@@ -62,8 +79,8 @@ python3 -m verl.trainer.main_ppo \
     distillation.method=$OPD_METHOD \
     distillation.target=$OPD_TARGET \
     distillation.topk=$OPD_TOPK \
-    distillation.loss_mode=k3 \
-    distillation.use_policy_gradient=True \
+    distillation.loss_mode=$OPD_LOSS_MODE \
+    distillation.use_policy_gradient=$OPD_USE_POLICY_GRADIENT \
     distillation.use_task_rewards=True \
     distillation.distillation_loss_coef=1.0 \
     distillation.loss_max_clamp=10.0 \
@@ -83,4 +100,3 @@ python3 -m verl.trainer.main_ppo \
     trainer.test_freq=5 \
     trainer.total_epochs=150 \
     trainer.val_before_train=True ${@:2}
-

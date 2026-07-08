@@ -755,6 +755,7 @@ class ActorRolloutRefWorker(Worker):
 
         target = data.meta_info.get("opd_target", "topk")
         topk = data.meta_info.get("opd_topk", 32)
+        normalize_topk = data.meta_info.get("opd_topk_normalize", False)
         micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
         data.meta_info["micro_batch_size"] = micro_batch_size
         data.meta_info["temperature"] = self.config.rollout.temperature
@@ -762,7 +763,7 @@ class ActorRolloutRefWorker(Worker):
         data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
-            output = self.ref_policy.compute_opd_distribution(data=data, target=target, topk=topk)
+            output = self.ref_policy.compute_opd_distribution(data=data, target=target, topk=topk, normalize_topk=normalize_topk)
             output = self.ulysses_sharding_manager.postprocess_data(output)
 
         output = output.to("cpu")

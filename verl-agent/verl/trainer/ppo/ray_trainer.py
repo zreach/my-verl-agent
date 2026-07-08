@@ -1209,9 +1209,16 @@ class RayPPOTrainer:
                     if self.use_teacher_policy:
                         with _timer("teacher", timing_raw):
                             distillation_method = self.config.distillation.get("method", None)
-                            if distillation_method is None:
-                                distillation_method = "pg" if self.config.distillation.get("use_policy_gradient", True) else "gkd"
+                            distillation_loss_mode = self.config.distillation.get("loss_mode", "k3")
                             distillation_target = self.config.distillation.get("target", "sampled")
+                            if distillation_method is None:
+                                if distillation_loss_mode == "forward_kl_topk":
+                                    distillation_method = "gkd"
+                                    distillation_target = "topk"
+                                else:
+                                    distillation_method = "pg" if self.config.distillation.get("use_policy_gradient", True) else "gkd"
+                            if distillation_method == "pg" and distillation_target != "sampled":
+                                raise ValueError("OPD PG follows the sampled-token estimator and only supports distillation.target=sampled.")
                             if distillation_method == "vopd":
                                 teacher_log_prob = self.teacher_policy_wg.compute_ref_log_prob(batch)
                                 teacher_log_prob.batch["teacher_log_probs"] = teacher_log_prob.batch.pop("ref_log_prob")
@@ -1223,6 +1230,7 @@ class RayPPOTrainer:
                                 if distillation_target in ["full", "topk"]:
                                     batch.meta_info["opd_target"] = distillation_target
                                     batch.meta_info["opd_topk"] = self.config.distillation.get("topk", 32)
+                                    batch.meta_info["opd_topk_normalize"] = distillation_target == "topk"
                                     teacher_distribution = self.teacher_policy_wg.compute_ref_opd_distribution(batch)
                                     batch = batch.union(teacher_distribution)
                                 else:
@@ -1234,6 +1242,7 @@ class RayPPOTrainer:
                             elif distillation_target in ["full", "topk"]:
                                 batch.meta_info["opd_target"] = distillation_target
                                 batch.meta_info["opd_topk"] = self.config.distillation.get("topk", 32)
+                                batch.meta_info["opd_topk_normalize"] = False
                                 teacher_distribution = self.teacher_policy_wg.compute_ref_opd_distribution(batch)
                                 batch = batch.union(teacher_distribution)
                             else:
