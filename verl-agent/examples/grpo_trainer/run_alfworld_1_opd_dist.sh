@@ -66,7 +66,7 @@ fi
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-$DEFAULT_EXPERIMENT_NAME}
 export TENSORBOARD_DIR=${TENSORBOARD_DIR:-tensorboard_log/${PROJECT_NAME}/${EXPERIMENT_NAME}}
 CKPT_DIR=${CKPT_DIR:-/root/agent/${EXPERIMENT_NAME}}
-SAVE_FREQ=${SAVE_FREQ:-5}
+SAVE_FREQ=${SAVE_FREQ:-20}
 
 python3 -m examples.data_preprocess.prepare \
     --mode 'text' \
