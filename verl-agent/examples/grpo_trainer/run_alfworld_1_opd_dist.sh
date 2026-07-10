@@ -19,17 +19,36 @@ OPD_TOPK=${OPD_TOPK:-32}
 RLSD_LAMBDA=${RLSD_LAMBDA:-0.5}
 RLSD_LAMBDA_DECAY_STEPS=${RLSD_LAMBDA_DECAY_STEPS:-50}
 RLSD_CLIP_EPSILON=${RLSD_CLIP_EPSILON:-0.2}
-if [ $# -gt 0 ] && [ "$1" = "--topk" ]; then
-    if [ $# -lt 2 ]; then
-        echo "--topk requires a positive integer value."
-        exit 1
-    fi
-    OPD_TOPK=$2
-    shift 2
-elif [ $# -gt 0 ] && [[ "$1" =~ ^[0-9]+$ ]]; then
-    OPD_TOPK=$1
-    shift
-fi
+ACTOR_KL_LOSS_COEF=${ACTOR_KL_LOSS_COEF:-0.01}
+EXTRA_ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --topk)
+            if [ $# -lt 2 ]; then
+                echo "--topk requires a positive integer value."
+                exit 1
+            fi
+            OPD_TOPK=$2
+            shift 2
+            ;;
+        --kl|--kl-loss-coef)
+            if [ $# -lt 2 ]; then
+                echo "$1 requires a numeric value."
+                exit 1
+            fi
+            ACTOR_KL_LOSS_COEF=$2
+            shift 2
+            ;;
+        *)
+            if [[ "$1" =~ ^[0-9]+$ ]] && [ "${#EXTRA_ARGS[@]}" -eq 0 ]; then
+                OPD_TOPK=$1
+            else
+                EXTRA_ARGS+=("$1")
+            fi
+            shift
+            ;;
+    esac
+done
 if ! [[ "$OPD_TOPK" =~ ^[0-9]+$ ]]; then
     echo "OPD_TOPK must be a positive integer, got: $OPD_TOPK"
     exit 1
@@ -38,6 +57,7 @@ if [ "$OPD_TOPK" -le 0 ]; then
     echo "OPD_TOPK must be greater than 0, got: $OPD_TOPK"
     exit 1
 fi
+set -- "${EXTRA_ARGS[@]}"
 OPD_LOSS_MODE=${OPD_LOSS_MODE:-}
 if [ -z "$OPD_LOSS_MODE" ]; then
     if [ "$OPD_METHOD" = "gkd" ] && [ "$OPD_TARGET" = "topk" ]; then
@@ -58,6 +78,12 @@ fi
 PROJECT_NAME=${PROJECT_NAME:-verl_agent_alfworld}
 if [ "$OPD_METHOD" = "rlsd" ]; then
     DEFAULT_EXPERIMENT_NAME=grpo_qwen2.5_1.5b_rlsd_l${RLSD_LAMBDA}_c${RLSD_CLIP_EPSILON}_d${RLSD_LAMBDA_DECAY_STEPS}
+elif [ "$OPD_METHOD" = "vopd" ]; then
+    if [ "$OPD_TARGET" = "topk" ]; then
+        DEFAULT_EXPERIMENT_NAME=grpo_qwen2.5_1.5b_vopd_${OPD_TARGET}_k${OPD_TOPK}_kl${ACTOR_KL_LOSS_COEF}
+    else
+        DEFAULT_EXPERIMENT_NAME=grpo_qwen2.5_1.5b_vopd_${OPD_TARGET}_kl${ACTOR_KL_LOSS_COEF}
+    fi
 elif [ "$OPD_TARGET" = "topk" ]; then
     DEFAULT_EXPERIMENT_NAME=grpo_qwen2.5_1.5b_opd_${OPD_METHOD}_${OPD_TARGET}_k${OPD_TOPK}
 else
@@ -90,7 +116,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.ppo_mini_batch_size=256 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.actor.use_kl_loss=True \
-    actor_rollout_ref.actor.kl_loss_coef=0.01 \
+    actor_rollout_ref.actor.kl_loss_coef=$ACTOR_KL_LOSS_COEF \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
