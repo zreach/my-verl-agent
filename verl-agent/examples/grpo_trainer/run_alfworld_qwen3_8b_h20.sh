@@ -15,6 +15,8 @@ ENGINE=${1:-vllm}
 #   * *_micro_batch_size_per_gpu: 8 -> 8              (kept; OOM headroom)
 #   * rollout.gpu_memory_utilization: 0.6 -> 0.45     (leave room for the actor)
 #   * rollout.free_cache_engine: False -> True        (release KV cache before train)
+#   * rollout.enforce_eager: False -> True            (required: free_cache_engine needs
+#                                                     CUDA graph off; see vllm_rollout_spmd.py)
 # Everything else (adv_estimator, KL loss + KL-in-reward monitoring, data size,
 # ppo_mini_batch_size, lr, penalties) is identical to the baseline.
 # Memory budget per card (~96GB): vllm ~43GB (rollout) / actor ~40GB (train),
@@ -79,7 +81,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.name=$ENGINE \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.45 \
     actor_rollout_ref.rollout.enable_chunked_prefill=False \
-    actor_rollout_ref.rollout.enforce_eager=False \
+    actor_rollout_ref.rollout.enforce_eager=True \
     actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.4 \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
