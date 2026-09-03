@@ -2,22 +2,25 @@ set -x
 ENGINE=${1:-vllm}
 
 # ---------------------------------------------------------------------------
-# Qwen3-8B GRPO on ALFWorld — H20 throughput-tuned variant.
+# Qwen3-8B GRPO on ALFWorld — H20-tuned variant.
 #
-# Same algorithm / data scale / KL monitoring as run_alfworld_qwen3_8b.sh, but
-# the memory-vs-speed knobs are flipped toward SPEED. Rationale: 8×H20 has huge
-# HBM (96GB/card) but weak BF16 compute, so the usual "trade compute/PCIe for
-# memory" defaults are net-negative here — we have memory to spare and compute
-# to save. Changes vs the baseline script:
+# Same algorithm / data scale / KL monitoring as run_alfworld_qwen3_8b.sh. The
+# knobs are tuned for 8×H20 (96GB HBM/card, weak BF16 compute). vllm (rollout)
+# and the FSDP actor SHARE the same 8 GPUs (colocate), so the binding constraint
+# is memory, not speed: vllm must not over-claim HBM or the actor can't fit.
+# Changes vs the baseline script:
 #   * enable_gradient_checkpointing: True -> False   (don't recompute activations)
-#   * rollout.tensor_model_parallel_size: 4 -> 2      (4 vllm replicas, faster rollout)
+#   * rollout.tensor_model_parallel_size: 4 -> 1      (8 vllm replicas, fastest rollout)
 #   * ref.fsdp_config.param_offload: True -> False    (keep ref weights resident)
-#   * *_micro_batch_size_per_gpu: 8 -> 16             (spend spare HBM on throughput)
-#   * rollout.gpu_memory_utilization: 0.6 -> 0.7      (more KV cache under tp=2)
+#   * *_micro_batch_size_per_gpu: 8 -> 8              (kept; OOM headroom)
+#   * rollout.gpu_memory_utilization: 0.6 -> 0.45     (leave room for the actor)
+#   * rollout.free_cache_engine: False -> True        (release KV cache before train)
 # Everything else (adv_estimator, KL loss + KL-in-reward monitoring, data size,
 # ppo_mini_batch_size, lr, penalties) is identical to the baseline.
-# If you hit OOM, first drop micro_batch back to 8, then gpu_memory_utilization
-# to 0.6, then re-enable gradient checkpointing.
+# Memory budget per card (~96GB): vllm ~43GB (rollout) / actor ~40GB (train),
+# freed between phases by free_cache_engine. If you still OOM, lower
+# gpu_memory_utilization to 0.4, then micro_batch to 4; if you have headroom,
+# raise gpu_memory_utilization back toward 0.5 for faster rollout.
 # ---------------------------------------------------------------------------
 
 # --- environment (matches the verified verl-agent ALFWorld recipe) ---
@@ -64,23 +67,23 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=256 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=16 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.01 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.model.enable_gradient_checkpointing=False \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=$ENGINE \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.45 \
     actor_rollout_ref.rollout.enable_chunked_prefill=False \
     actor_rollout_ref.rollout.enforce_eager=False \
-    actor_rollout_ref.rollout.free_cache_engine=False \
+    actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.4 \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.use_invalid_action_penalty=True \
     actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
