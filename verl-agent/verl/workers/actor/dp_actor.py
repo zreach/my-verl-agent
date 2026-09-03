@@ -696,6 +696,9 @@ class DataParallelPPOActor(BasePPOActor):
 
                         # compute policy loss
                         policy_loss = pg_loss - entropy_loss * entropy_coeff
+                        # actual entropy-regularization contribution to the loss
+                        # (entropy times its coefficient), as opposed to bare H(pi).
+                        metrics["actor/entropy_loss_real"] = (entropy_loss * entropy_coeff).detach().item()
                     else:
                         policy_loss = pg_loss
 
