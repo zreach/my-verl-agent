@@ -90,12 +90,12 @@ python3 -m verl.trainer.main_ppo \
     env.rollout.n=$group_size \
     env.resources_per_worker.num_cpus=$num_cpus_per_env_worker \
     trainer.critic_warmup=0 \
-    trainer.logger=['console','tensorboard'] \
+    trainer.logger=['console','tensorboard','wandb'] \
     trainer.project_name='verl_agent_alfworld' \
     trainer.experiment_name='grpo_qwen3_8b' \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
-    trainer.save_freq=-1 \
+    trainer.save_freq=20 \
     trainer.test_freq=5 \
     trainer.total_epochs=1 \
     trainer.val_before_train=True $@
