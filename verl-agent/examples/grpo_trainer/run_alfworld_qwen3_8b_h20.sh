@@ -17,8 +17,12 @@ ENGINE=${1:-vllm}
 #   * rollout.free_cache_engine: False -> True        (release KV cache before train)
 #   * rollout.enforce_eager: False -> True            (required: free_cache_engine needs
 #                                                     CUDA graph off; see vllm_rollout_spmd.py)
-# Everything else (adv_estimator, KL loss + KL-in-reward monitoring, data size,
-# ppo_mini_batch_size, lr, penalties) is identical to the baseline.
+# KL: matches the baseline — use_kl_loss=True (loss-side KL, coef 0.01) which is
+# enough to MONITOR KL via actor/kl_loss. We do NOT add use_kl_in_reward (the
+# baseline keeps it False): a previous run had it True and double-penalized KL,
+# which collapsed response length (~130 -> ~15 tokens, CoT dropped) and tanked
+# success rate. Everything else (adv_estimator, data size, ppo_mini_batch_size,
+# lr, penalties) is identical to the baseline.
 # Memory budget per card (~96GB): vllm ~43GB (rollout) / actor ~40GB (train),
 # freed between phases by free_cache_engine. If you still OOM, lower
 # gpu_memory_utilization to 0.4, then micro_batch to 4; if you have headroom,
@@ -89,8 +93,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.use_invalid_action_penalty=True \
     actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
-    algorithm.use_kl_in_reward=True \
-    algorithm.kl_ctrl.kl_coef=0.001 \
+    algorithm.use_kl_in_reward=False \
     env.env_name=alfworld/AlfredTWEnv \
     env.seed=0 \
     env.max_steps=50 \

@@ -2,19 +2,20 @@ set -x
 ENGINE=${1:-vllm}
 
 # ---------------------------------------------------------------------------
-# Qwen3-1.7B GRPO on ALFWorld — H20 variant A (1.7B version).
+# Qwen3-8B GRPO training on ALFWorld with entropy + KL-to-reference monitoring.
 #
-# Same recipe as run_alfworld_qwen3_8b_h20.sh (variant A: CUDA graph off,
-# free_cache_engine=True to release the KV cache between rollout and training),
-# only the model is swapped 8B -> 1.7B (Qwen3-1.7B, still a dense text
-# Qwen3ForCausalLM, so enable_thinking=False still applies).
+# Monitoring (核心诉求):
+#   * actor/entropy_loss        -> policy entropy each step (自动记录)
+#   * actor/kl_loss + kl_coef   -> KL to the initial/reference policy (use_kl_loss=True)
+#   * actor/reward_kl_penalty   -> KL-in-reward 视图 (use_kl_in_reward=True), 与 loss 侧 KL 交叉验证
+#   These stream to BOTH the console and TensorBoard (see TENSORBOARD_DIR below), so
+#   they become trackable curves over training steps.
 #
-# 1.7B is ~5x smaller than 8B, so per-card memory pressure drops a lot and this
-# variant-A config has huge headroom on H20 (96GB). It will run comfortably as
-# is; once you confirm the actual nvidia-smi peak you can push
-# gpu_memory_utilization and the micro-batch sizes up to trade the spare HBM for
-# faster rollout/training. Everything else (adv_estimator, KL loss + KL-in-reward
-# monitoring, data size, ppo_mini_batch_size, lr, penalties) matches the 8B script.
+# Model note: 本地 HF 无 Qwen3.5-8B; Qwen3.5-9B 是 qwen3_5 混合线性注意力+VL 架构,
+#   当前 vllm 0.11.0 不支持。故使用已验证可跑的 Qwen3-8B (dense, Qwen3ForCausalLM)。
+#
+# Scale note: 全量训练 (total_epochs=150), 与 run_alfworld.sh 基线一致。
+#   每步 16 个 prompt × group_size=8 rollouts = 128 条轨迹。
 # ---------------------------------------------------------------------------
 
 # --- environment (matches the verified verl-agent ALFWorld recipe) ---
@@ -30,7 +31,7 @@ export ALFWORLD_DATA=${ALFWORLD_DATA:-/root/.cache/alfworld}
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 
 # TensorBoard event files land here; view with `tensorboard --logdir $TENSORBOARD_DIR`.
-export TENSORBOARD_DIR=${TENSORBOARD_DIR:-/volume/posttrain/users/zhouyz/verl_agent_tb/grpo_qwen3_1p7b_alfworld_h20}
+export TENSORBOARD_DIR=${TENSORBOARD_DIR:-/volume/posttrain/users/zhouyz/verl_agent_tb/grpo_qwen3_8b_alfworld}
 mkdir -p "$TENSORBOARD_DIR"
 
 num_cpus_per_env_worker=0.1 # CPU resource per environment worker. Lower to use fewer CPU resources.
@@ -57,7 +58,7 @@ python3 -m verl.trainer.main_ppo \
     data.truncation='error' \
     data.return_raw_chat=True \
     +data.apply_chat_template_kwargs.enable_thinking=False \
-    actor_rollout_ref.model.path=Qwen/Qwen3-1.7B \
+    actor_rollout_ref.model.path=Qwen/Qwen3-8B \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=256 \
@@ -71,14 +72,14 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=$ENGINE \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.45 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.enable_chunked_prefill=False \
-    actor_rollout_ref.rollout.enforce_eager=True \
-    actor_rollout_ref.rollout.free_cache_engine=True \
+    actor_rollout_ref.rollout.enforce_eager=False \
+    actor_rollout_ref.rollout.free_cache_engine=False \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.4 \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8 \
-    actor_rollout_ref.ref.fsdp_config.param_offload=False \
+    actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.use_invalid_action_penalty=True \
     actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
     algorithm.use_kl_in_reward=False \
@@ -90,7 +91,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger=['console','tensorboard','wandb'] \
     trainer.project_name='verl_agent_alfworld' \
-    trainer.experiment_name='grpo_qwen3_1p7b_h20' \
+    trainer.experiment_name='grpo_qwen3_8b' \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
     trainer.save_freq=20 \
